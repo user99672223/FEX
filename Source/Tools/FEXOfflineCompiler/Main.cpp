@@ -534,6 +534,12 @@ static std::optional<std::string> GenerateSingleCache(FEXCore::ExecutableFileInf
     }
     close(fd);
     std::filesystem::rename(FilenameNew.c_str(), Filename.c_str());
+    // iRL (iOS): free this module's compile thread, and with it its code buffer, before the next
+    // module. Each module gets a new context and thread; without this every module kept its 128 MB
+    // code buffer and process-all ran out of the JIT pool after about 4 modules.
+    CTX->DestroyThread(Thread);
+    Thread = nullptr;
+    fmt::print(stderr, "Cache written: {}\n", Filename);
     return Filename;
   }
 }
