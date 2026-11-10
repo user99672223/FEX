@@ -27,6 +27,8 @@
 #include <elf.h>
 #endif
 #include <fmt/printf.h>
+#include <cstdlib>
+#include <cstring>
 #include <libgen.h>
 
 #include <fcntl.h>
@@ -825,6 +827,8 @@ static int ProcessAll() {
 
 #if defined(_M_ARM64EC) && defined(FEX_IOS_HOST)
 extern "C" uint32_t IosTebTsdOffset;
+extern "C" uint32_t IosEcReturnWithRet;
+extern "C" uint32_t IosCallRetStackElided;
 #endif
 
 int main(int argc, char** argv) {
@@ -850,6 +854,16 @@ int main(int argc, char** argv) {
     }
     IosTebTsdOffset = *Published;
     fmt::print(stderr, "[aot] TEB TSD offset {:#x} (from ntdll)\n", IosTebTsdOffset);
+
+    // The same codegen switches xtajit64.dll sets at process init (ARM64EC/Module.cpp, same env
+    // overrides and defaults). Cached blocks must be emitted exactly as the runtime JIT would: with
+    // the call-ret stack kept while the runtime elides it, cached calls pushed through an
+    // uninitialised call-ret pointer.
+    const char* EcRetOpt = getenv("MADEIRA_FEX_EC_RET");
+    IosEcReturnWithRet = !(EcRetOpt && strcmp(EcRetOpt, "0") == 0);
+    const char* CallRetOpt = getenv("MADEIRA_FEX_CALLRET_ELIDE");
+    IosCallRetStackElided = !(CallRetOpt && strcmp(CallRetOpt, "0") == 0);
+    fmt::print(stderr, "[aot] codegen ec-ret={} callret-elide={}\n", IosEcReturnWithRet, IosCallRetStackElided);
   }
 #endif
 
