@@ -1316,6 +1316,11 @@ NTSTATUS ProcessInit() {
 void ProcessTerm(HANDLE Handle, BOOL After, NTSTATUS Status) {
   if (!After) {
     ProcessTerminating.store(true, std::memory_order_relaxed);
+  } else if (CTX) {
+    // iRL: write the JIT-miss code map's last partial buffer (<= 4 KB) to disk. FEX's Linux frontend
+    // does this on exit; the Windows frontend never did, so short runs left 0-byte code maps.
+    // After == TRUE: Wine has already terminated the other threads, so nothing appends concurrently.
+    CTX->FlushAndCloseCodeMap();
   }
 }
 
