@@ -127,7 +127,7 @@ public:
    */
   [[nodiscard]]
   bool ApplyCodeRelocations(uint64_t GuestDelta, std::span<std::byte> Code, std::span<const CPU::Relocation> Relocations,
-                            uint32_t RelocationOffset, bool ForStorage);
+                            uint32_t RelocationOffset, bool ForStorage, int64_t WriteOffset = 0);
 };
 
 class ContextImpl final : public FEXCore::Context::Context, public CPU::CodeBufferManager {

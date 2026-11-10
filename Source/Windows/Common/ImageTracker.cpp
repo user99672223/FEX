@@ -242,11 +242,25 @@ void ImageTracker::LoadAOTImages(MappedImageInfo& ImageInfo) {
   OBJECT_ATTRIBUTES FileAttr;
   InitializeObjectAttributes(&FileAttr, &*CurrentFileName, OBJ_CASE_INSENSITIVE, nullptr, nullptr);
 
+#ifdef _M_ARM64EC
+  // iRL: on ARM64EC, LoadCache copies the code into its own EC_CODE buffer and only ever reads this
+  // view, so map it read-only. An executable view of a 199 MB cache made Madeira's Wine copy the
+  // whole file into the iOS JIT pool as an anonymous RWX alias (device log run6: "[jit-copy] ml634 ...
+  // copied into pool", head_used +199 MB for rocketleague.exe alone) on top of the 115 MB code copy;
+  // the pool is charged in full against the memory limit and could not hold the EOS SDK cache too.
+  // A read-only view is a plain file mapping: clean, file-backed pages iOS can drop.
+  constexpr ACCESS_MASK CacheSectionAccess = SECTION_MAP_READ;
+  constexpr ULONG CacheProtect = PAGE_READONLY;
+#else
+  // WoW64 executes the cached code straight from the mapped file.
+  constexpr ACCESS_MASK CacheSectionAccess = SECTION_MAP_EXECUTE | SECTION_MAP_READ;
+  constexpr ULONG CacheProtect = PAGE_EXECUTE_READ;
+#endif
+
   ScopedHandle FileHandle;
   if (NT_SUCCESS(NtOpenFile(&*FileHandle, GENERIC_READ | SYNCHRONIZE, &FileAttr, &IOSB, FILE_SHARE_READ, FILE_SYNCHRONOUS_IO_NONALERT))) {
     ScopedHandle SectionHandle;
-    if (NT_SUCCESS(NtCreateSection(&*SectionHandle, SECTION_MAP_EXECUTE | SECTION_MAP_READ, nullptr, nullptr, PAGE_EXECUTE_READ, SEC_COMMIT,
-                                   *FileHandle))) {
+    if (NT_SUCCESS(NtCreateSection(&*SectionHandle, CacheSectionAccess, nullptr, nullptr, CacheProtect, SEC_COMMIT, *FileHandle))) {
       void* LoadAddress = nullptr;
       SIZE_T MappedSize = 0;
       // TODO: Consider NtMapViewOfSectionEx with MEM_EXTENDED_PARAMETER_EC_CODE;
@@ -255,7 +269,7 @@ void ImageTracker::LoadAOTImages(MappedImageInfo& ImageInfo) {
       // ECParam.Type = MemExtendedParameterAttributeFlags;
       // ECParam.ULong64 = MEM_EXTENDED_PARAMETER_EC_CODE;
       if (NT_SUCCESS(NtMapViewOfSection(*SectionHandle, NtCurrentProcess(), &LoadAddress, 0, 0, nullptr, &MappedSize, ViewUnmap,
-                                        MEM_RESERVE | MEM_TOP_DOWN, PAGE_EXECUTE_READ))) {
+                                        MEM_RESERVE | MEM_TOP_DOWN, CacheProtect))) {
 
         auto CacheSpan = std::span {static_cast<std::byte*>(LoadAddress), MappedSize};
         auto MappedCache = CTX.GetCodeCache().LoadCache(CacheSpan, ImageInfo.Info, ImageInfo.SectionInfo.FileStartVA);

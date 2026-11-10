@@ -28,6 +28,10 @@
 #include <xxhash.h>
 
 #include <FEXCore/Utils/AllocatorHooks.h>
+#include <FEXCore/Utils/DualMap.h>
+
+#include <atomic>
+#include <cstdlib>
 
 #include <fstream>
 
@@ -519,8 +523,11 @@ void CodeCache::Validate(const ExecutableFileSectionInfo& Section, fextl::set<ui
 }
 
 bool CodeCache::ApplyCodeRelocations(uint64_t GuestEntry, std::span<std::byte> Code,
-                                     std::span<const FEXCore::CPU::Relocation> EntryRelocations, uint32_t RelocationOffset, bool ForStorage) {
+                                     std::span<const FEXCore::CPU::Relocation> EntryRelocations, uint32_t RelocationOffset, bool ForStorage,
+                                     int64_t WriteOffset) {
   CPU::Arm64Emitter Emitter(&CTX, Code.data(), Code.size_bytes());
+  // Code addresses stay the executable ones; stores go to Code + WriteOffset (the iOS JIT pool's RW alias).
+  Emitter.SetWriteOffset(WriteOffset);
   for (size_t j = 0; j < EntryRelocations.size(); ++j) {
     const FEXCore::CPU::Relocation& Reloc = EntryRelocations[j];
     LOGMAN_THROW_A_FMT(Reloc.Header.Offset >= RelocationOffset, "Invalid relocation offset");
@@ -845,6 +852,27 @@ std::span<std::byte> AbstractCodeCache::SelectCodeRangeToFinalize(MappedCodeCach
 
 namespace FEXCore::Context {
 
+#if defined(_M_ARM64EC) && defined(FEX_IOS_HOST)
+// RX -> RW distance for [Ptr, Ptr + Size) when the range lies in the iOS JIT pool (the same pool bounds
+// IosAtomicWritableAlias uses), else 0: memory outside the pool has no RW alias.
+static int64_t IosPoolWriteOffset(const void* Ptr, size_t Size) {
+  const int64_t Offset = FEXCore::DualMap::WriteOffset;
+  if (!Offset || !Ptr) {
+    return 0;
+  }
+  static const auto Pool = [] {
+    const char* RxEnv = getenv("WINE_IOS_JIT_RX");
+    const char* SzEnv = getenv("WINE_IOS_JIT_SIZE");
+    return std::pair<uint64_t, uint64_t> {RxEnv ? strtoull(RxEnv, nullptr, 16) : 0, SzEnv ? strtoull(SzEnv, nullptr, 16) : 0};
+  }();
+  const auto Begin = reinterpret_cast<uint64_t>(Ptr);
+  if (!Pool.first || !Pool.second || Begin < Pool.first || Begin + Size > Pool.first + Pool.second) {
+    return 0;
+  }
+  return Offset;
+}
+#endif
+
 void CodeCache::FinalizeCodePages(MappedCodeCacheFile& Code, std::span<std::byte> CodeRange) {
   const size_t StartOffset = CodeRange.data() - Code.CodeBuffer.data();
   const auto StartPage = StartOffset / Utils::FEX_PAGE_SIZE;
@@ -905,12 +933,27 @@ void CodeCache::FinalizeCodePages(MappedCodeCacheFile& Code, std::span<std::byte
   Allocator::VirtualDontNeed(Code.CodeBufferInFile.data() + StartOffset, Size);
 #else
   // TODO: Implement lazy mapping on Windows
+  int64_t WriteOffset = 0;
 #ifdef _M_ARM64EC
-  memcpy(Code.CodeBuffer.data() + StartOffset, Code.CodeBufferInFile.data() + StartOffset, Size);
+#ifdef FEX_IOS_HOST
+  // iRL: the EC_CODE buffer is in the iOS JIT pool, whose executable view is not writable. Copy and
+  // relocate through the RW alias like the JIT emits code. Writing the RX view directly made every
+  // 32-byte store fault into Wine's store emulator (device log run6: 7.4 million emulated stores,
+  // ~3.5 us each, ~60 s at 100% CPU before the game ran a single cached block).
+  WriteOffset = IosPoolWriteOffset(Code.CodeBuffer.data(), Code.CodeBuffer.size_bytes());
+  {
+    static std::atomic<int> Logged {0};
+    if (Logged.fetch_add(1, std::memory_order_relaxed) < 32) {
+      LogMan::Msg::IFmt("[aot-finalize] {} pages at {} via {}", EndPage - StartPage, fmt::ptr(CodeRange.data()),
+                        WriteOffset ? "RW alias" : "RX view (no pool alias: emulated stores)");
+    }
+  }
+#endif
+  memcpy(Code.CodeBuffer.data() + StartOffset + WriteOffset, Code.CodeBufferInFile.data() + StartOffset, Size);
 #endif
   for (size_t i = StartPage; i < EndPage; ++i) {
     auto PageRelocations = SpanPageRelocations(Code, i);
-    (void)ApplyCodeRelocations(Code.GuestBase, Code.CodeBuffer, PageRelocations, 0, false);
+    (void)ApplyCodeRelocations(Code.GuestBase, Code.CodeBuffer, PageRelocations, 0, false, WriteOffset);
     Code.LoadedPages[i] = true;
   }
 #endif
