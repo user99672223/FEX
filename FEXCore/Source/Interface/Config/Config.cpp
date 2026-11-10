@@ -479,6 +479,11 @@ void Erase(ConfigOption Option) {
 
 template<typename T>
 T Value<T>::GetIfExists(FEXCore::Config::ConfigOption Option, T Default) {
+  // iRL: an option read before config initialization (e.g. Logging::Init's SilentLog in a Windows
+  // tool's main) gets its default instead of dereferencing a null Meta layer.
+  if (!Meta) {
+    return Default;
+  }
   auto Value = FEXCore::Config::GetConv<T>(Option);
   if (Value) {
     return *Value;
@@ -489,6 +494,9 @@ T Value<T>::GetIfExists(FEXCore::Config::ConfigOption Option, T Default) {
 
 template<>
 fextl::string Value<fextl::string>::GetIfExists(FEXCore::Config::ConfigOption Option, fextl::string Default) {
+  if (!Meta) {
+    return Default;
+  }
   auto Value = FEXCore::Config::Get(Option);
   if (Value) {
     return **Value;
@@ -499,6 +507,9 @@ fextl::string Value<fextl::string>::GetIfExists(FEXCore::Config::ConfigOption Op
 
 template<>
 fextl::string Value<fextl::string>::GetIfExists(FEXCore::Config::ConfigOption Option, std::string_view Default) {
+  if (!Meta) {
+    return fextl::string(Default);
+  }
   auto Value = FEXCore::Config::Get(Option);
   if (Value) {
     return **Value;
