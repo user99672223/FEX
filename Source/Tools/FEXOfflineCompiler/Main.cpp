@@ -823,12 +823,34 @@ static int ProcessAll() {
   return 0;
 }
 
+#if defined(_M_ARM64EC) && defined(FEX_IOS_HOST)
+extern "C" uint32_t IosTebTsdOffset;
+#endif
+
 int main(int argc, char** argv) {
 #ifndef _WIN32
   LogMan::Throw::InstallHandler(AssertHandler);
   LogMan::Msg::InstallHandler(MsgHandler);
 #else
   FEX::Windows::Logging::Init();
+#endif
+
+#if defined(_M_ARM64EC) && defined(FEX_IOS_HOST)
+  // iRL (iOS): every TEB read FEX emits on iOS loads the TEB through the TSD slot that Wine's ntdll
+  // publishes (ios_teb_tsd_offset). xtajit64.dll imports it at process init (ARM64EC/Module.cpp), but
+  // this tool links its own FEXCore whose copy stayed 0, so every cached block that reads the TEB
+  // (CPUID, syscall callbacks) loaded slot 0 and crashed the game. Import it the same way; no
+  // offset, no caches.
+  {
+    const auto NtDllForTsd = GetModuleHandle("ntdll.dll");
+    const auto Published = reinterpret_cast<uint32_t*>(GetProcAddress(NtDllForTsd, "ios_teb_tsd_offset"));
+    if (!Published || !*Published) {
+      fmt::print(stderr, "ERROR: ntdll does not publish ios_teb_tsd_offset; refusing to generate caches\n");
+      return 1;
+    }
+    IosTebTsdOffset = *Published;
+    fmt::print(stderr, "[aot] TEB TSD offset {:#x} (from ntdll)\n", IosTebTsdOffset);
+  }
 #endif
 
   std::vector<const char*> Args {argv + 1, argv + argc};
