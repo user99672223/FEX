@@ -1,4 +1,8 @@
 add_executable(FEXOfflineCompiler Main.cpp)
+if (FEX_IOS_HOST_BUILD)
+  # iRL: the iOS runtime hooks FEXCore references live in the ARM64EC module; see the file.
+  target_sources(FEXOfflineCompiler PRIVATE IosOfflineStubs.cpp)
+endif()
 
 target_link_libraries(FEXOfflineCompiler PRIVATE
   Common
